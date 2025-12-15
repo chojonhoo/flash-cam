@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <!-- 核心修改：viewport-fit=cover 让页面充满刘海和底部安全区 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Flash Camera Pro</title>
+    <style>
+        :root {
+            --primary-color: #ffcc00;
+            --text-color: #fff;
+            /* 动态获取安全区域距离，适配所有全面屏 iPhone */
+            --safe-top: env(safe-area-inset-top, 50px); 
+            --safe-bottom: env(safe-area-inset-bottom, 34px);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-tap-highlight-color: transparent; }
+
+        body {
+            background-color: #000;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            /* 禁用iOS回弹效果 */
+            position: fixed; 
+        }
+
+        /* 视频层：铺满全屏 */
+        .camera-view {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            background: #111;
+        }
+
+        #videoElement {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* 模拟全面屏取景 */
+            transition: filter 0.3s ease;
+        }
+
+        /* 构图框线层 */
+        .overlays {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .frame-line {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.5); /* 超大阴影作为遮罩 */
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+        }
+        .frame-line::after {
+            content: attr(data-focal);
+            position: absolute;
+            bottom: -20px; right: 4px;
+            color: #fff; font-size: 10px; font-weight: 600; text-shadow: 0 1px 2px black;
+        }
+
+        /* UI 顶栏：针对灵动岛适配 */
+        .top-bar {
+            position: absolute;
+            top: 0; left: 0; width: 100%;
+            z-index: 20;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            /* 关键：顶部内边距 = 安全区 + 额外留白 */
+            padding-top: calc(var(--safe-top) + 10px); 
+            padding-left: 24px;
+            padding-right: 24px;
+            /* 渐变背景让白色图标更清晰 */
+            background: linear-gradient(to bottom, rgba(0,0,0,0.4) 0%, transparent 100%);
+            height: 120px; /* 给渐变留够高度 */
+        }
+        .icon-btn {
+            font-size: 20px; color: #fff; opacity: 0.9;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+        }
+
+        /* UI 底栏：针对 Home Indicator 适配 */
+        .bottom-controls {
+            position: absolute;
+            bottom: 0; left: 0; width: 100%;
+            z-index: 30;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            /* 关键：底部内边距 = 安全区 + 额外留白 */
+            padding-bottom: calc(var(--safe-bottom) + 20px); 
+            background: linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%);
+            height: 300px;
+        }
+
+        /* 参数胶囊 */
+        .pills-row {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 30px;
+        }
+        .pill {
+            background: rgba(20, 20, 20, 0.6);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px); /* iOS必须加这个 */
+            border: 0.5px solid rgba(255,255,255,0.15);
+            border-radius: 18px;
+            height: 36px;
+            padding: 0 14px;
+            display: flex; align-items: center; gap: 6px;
+            color: #eee; font-size: 13px; font-weight: 500;
+            transition: 0.2s;
+        }
+        .pill.active { background: #fff; color: #000; }
+
+        /* 快门区域 */
+        .shutter-row {
+            display: flex;
+            justify-content: space-between; /* 两端对齐，中间快门 */
+            align-items: center;
+            padding: 0 40px; /* 两侧留白 */
+            position: relative;
+        }
+
+        /* 相册入口 */
+        .gallery-preview {
+            width: 48px; height: 48px;
+            background: #333;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .gallery-preview img { width: 100%; height: 100%; object-fit: cover; opacity: 0.8; }
+
+        /* 快门按钮：尺寸调大方便拇指 */
+        .shutter-outer {
+            width: 76px; height: 76px;
+            border-radius: 50%;
+            border: 4px solid #fff;
+            display: flex; align-items: center; justify-content: center;
+            /* 增加点击热区 */
+            touch-action: manipulation;
+        }
+        .shutter-inner {
+            width: 62px; height: 62px;
+            background: #fff;
+            border-radius: 50%;
+            transition: transform 0.1s;
+        }
+        .shutter-outer:active .shutter-inner { transform: scale(0.9); }
+
+        /* 相机切换按钮 */
+        .cam-switch {
+            width: 48px; height: 48px;
+            border-radius: 50%;
+            background: rgba(30,30,30,0.8);
+            backdrop-filter: blur(10px);
+            display: flex; align-items: center; justify-content: center;
+            color: var(--primary-color);
+            font-size: 22px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        /* 调节面板 */
+        .adj-panel {
+            position: absolute;
+            bottom: 140px; 
+            width: 100%;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            animation: slideUp 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        .adj-panel.show { display: flex; }
+        
+        .adj-val { 
+            color: var(--primary-color); font-family: monospace; font-size: 16px; font-weight: bold; margin-bottom: 12px; 
+            text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+        }
+
+        /* 自定义 Slider 适配手指粗细 */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 70%;
+            height: 4px;
+            background: rgba(255,255,255,0.3);
+            border-radius: 2px;
+            outline: none;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 24px; height: 24px; /* 加大滑块 */
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+        }
+
+        /* 焦段选择器 */
+        .focal-row { display: flex; gap: 16px; }
+        .focal-opt {
+            padding: 6px 12px; border-radius: 6px;
+            background: rgba(0,0,0,0.6); border: 1px solid #666; color: #ccc;
+            font-size: 13px;
+        }
+        .focal-opt.active { background: #fff; color: #000; border-color: #fff; }
+
+        @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* 相机抽屉：适配圆角屏幕 */
+        .drawer {
+            position: absolute;
+            bottom: 0; left: 0; width: 100%; height: 320px;
+            background: #1c1c1e; /* iOS 默认深色背景 */
+            border-radius: 24px 24px 0 0;
+            padding: 24px;
+            padding-bottom: calc(var(--safe-bottom) + 20px);
+            transform: translateY(100%);
+            transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1);
+            z-index: 50;
+        }
+        .drawer.open { transform: translateY(0); }
+        .drawer-head { display: flex; justify-content: space-between; color: #fff; font-weight: 600; font-size: 17px; margin-bottom: 24px; }
+        
+        .cam-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+        .cam-card { display: flex; flex-direction: column; align-items: center; gap: 8px; opacity: 0.6; }
+        .cam-card.selected { opacity: 1; }
+        .cam-icon {
+            width: 56px; height: 56px;
+            background: #2c2c2e; border-radius: 14px;
+            display: flex; align-items: center; justify-content: center; font-size: 26px;
+            border: 2px solid transparent;
+        }
+        .cam-card.selected .cam-icon { border-color: var(--primary-color); background: #000; }
+        .cam-label { font-size: 11px; color: #98989d; font-weight: 500; }
+
+        /* 模拟闪黑 */
+        #flash-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; pointer-events: none; opacity: 0; z-index: 100;
+        }
+
+        /* 滤镜定义 */
+        .f-leica { filter: contrast(1.1) saturate(1.1) brightness(0.95) sepia(0.1); }
+        .f-ricoh { filter: grayscale(1) contrast(1.5) brightness(1.1); }
+        .f-fuji { filter: saturate(1.2) hue-rotate(-5deg) contrast(1.05); }
+
+    </style>
+</head>
+<body>
+
+    <!-- 摄像头画面 -->
+    <div class="camera-view">
+        <!-- iOS Safari/WebView 支持 playsinline 属性，防止视频自动全屏 -->
+        <video id="videoElement" autoplay playsinline muted></video>
+    </div>
+
+    <!-- 构图辅助线 -->
+    <div class="overlays">
+        <div class="frame-line" id="frameLine" data-focal="50mm"></div>
+    </div>
+
+    <!-- 顶部 -->
+    <div class="top-bar">
+        <div class="icon-btn">⚡</div>
+        <div class="icon-btn">RAW</div>
+    </div>
+
+    <!-- 底部控制 -->
+    <div class="bottom-controls">
+
+        <!-- 调节面板 -->
+        <div class="adj-panel" id="adjPanel">
+            <div class="adj-val" id="adjVal">0.0</div>
+            <div id="sliderBox" style="width:100%; display:flex; justify-content:center;"></div>
+            <div class="focal-row" id="focalBox" style="display:none;">
+                <div class="focal-opt active" onclick="setFocal(24)">24</div>
+                <div class="focal-opt" onclick="setFocal(35)">35</div>
+                <div class="focal-opt" onclick="setFocal(50)">50</div>
+                <div class="focal-opt" onclick="setFocal(85)">85</div>
+            </div>
+        </div>
+
+        <!-- 参数胶囊 -->
+        <div class="pills-row">
+            <div class="pill" onclick="toggleMode('temp')">
+                <span>🌡</span> <span id="txtTemp">5500K</span>
+            </div>
+            <div class="pill" onclick="toggleMode('ev')">
+                <span>☀</span> <span id="txtEv">+0.0</span>
+            </div>
+            <div class="pill" onclick="toggleMode('focal')">
+                <span style="font-weight:900; font-family:serif;">f</span> <span id="txtFocal">24mm</span>
+            </div>
+        </div>
+
+        <!-- 底部快门栏 -->
+        <div class="shutter-row">
+            <div class="gallery-preview">
+                <img src="https://images.unsplash.com/photo-1621517724883-9366df2205c5?w=100&q=80" alt="album">
+            </div>
+            <div class="shutter-outer" onclick="snap()">
+                <div class="shutter-inner"></div>
+            </div>
+            <div class="cam-switch" onclick="toggleDrawer()">
+                📷
+            </div>
+        </div>
+    </div>
+
+    <!-- 相机选择抽屉 -->
+    <div class="drawer" id="camDrawer">
+        <div class="drawer-head">
+            <span>Cameras</span>
+            <span onclick="toggleDrawer()" style="opacity:0.5; font-size:24px;">⌄</span>
+        </div>
+        <div class="cam-grid">
+            <div class="cam-card selected" onclick="setCam('leica', this)">
+                <div class="cam-icon">🔴</div><span class="cam-label">M-Classic</span>
+            </div>
+            <div class="cam-card" onclick="setCam('ricoh', this)">
+                <div class="cam-icon">⚫</div><span class="cam-label">GR-Mono</span>
+            </div>
+            <div class="cam-card" onclick="setCam('fuji', this)">
+                <div class="cam-icon">🟢</div><span class="cam-label">NC-Color</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="flash-overlay"></div>
+
+<script>
+    // --- 1. 调用真实摄像头 ---
+    async function initCamera() {
+        try {
+            // 请求后置摄像头
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    facingMode: "environment", // 后置
+                    width: { ideal: 1920 },    // 尽可能高清
+                    height: { ideal: 1080 }
+                }, 
+                audio: false 
+            });
+            const video = document.getElementById('videoElement');
+            video.srcObject = stream;
+        } catch (err) {
+            console.error("Camera failed, using fallback img", err);
+            // 如果是在模拟器或拒绝权限，回退到图片
+            document.querySelector('.camera-view').innerHTML = 
+                '<img src="https://images.unsplash.com/photo-1555436169-20e93ee0a7ac?q=80&w=1000" id="videoElement" style="width:100%;height:100%;object-fit:cover;">';
+        }
+    }
+    // 页面加载后启动相机
+    initCamera();
+
+    // --- 2. 交互逻辑 ---
+    const state = { mode: null, ev: 0, temp: 5500, focal: 24, cam: 'leica' };
+    const els = {
+        video: null, // 动态获取
+        adjPanel: document.getElementById('adjPanel'),
+        sliderBox: document.getElementById('sliderBox'),
+        focalBox: document.getElementById('focalBox'),
+        adjVal: document.getElementById('adjVal'),
+        frameLine: document.getElementById('frameLine')
+    };
+
+    function getVideoEl() { return document.getElementById('videoElement'); }
+
+    function toggleMode(mode) {
+        if (state.mode === mode) {
+            // 关闭
+            state.mode = null;
+            els.adjPanel.classList.remove('show');
+            resetPills();
+            return;
+        }
+        state.mode = mode;
+        els.adjPanel.classList.add('show');
+        resetPills();
+        
+        // 渲染不同的调节器
+        els.sliderBox.innerHTML = '';
+        els.focalBox.style.display = 'none';
+        
+        if (mode === 'ev') {
+            els.adjVal.innerText = (state.ev > 0 ? '+' : '') + state.ev.toFixed(1);
+            createSlider(-2, 2, 0.1, state.ev, (val) => {
+                state.ev = parseFloat(val);
+                els.adjVal.innerText = (state.ev > 0 ? '+' : '') + state.ev.toFixed(1);
+                document.getElementById('txtEv').innerText = els.adjVal.innerText;
+                applyFilter();
+            });
+        } else if (mode === 'temp') {
+            els.adjVal.innerText = state.temp + 'K';
+            createSlider(3000, 8000, 100, state.temp, (val) => {
+                state.temp = parseInt(val);
+                els.adjVal.innerText = state.temp + 'K';
+                document.getElementById('txtTemp').innerText = els.adjVal.innerText;
+                applyFilter();
+            });
+        } else if (mode === 'focal') {
+            els.adjVal.innerText = 'LENS';
+            els.focalBox.style.display = 'flex';
+        }
+    }
+
+    function createSlider(min, max, step, val, callback) {
+        const input = document.createElement('input');
+        input.type = 'range';
+        input.min = min; input.max = max; input.step = step; input.value = val;
+        input.oninput = (e) => callback(e.target.value);
+        els.sliderBox.appendChild(input);
+    }
+
+    function resetPills() {
+        document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    }
+
+    // 焦段框线逻辑 (iPhone 15 Pro 默认主摄等效24mm)
+    function setFocal(mm) {
+        state.focal = mm;
+        document.getElementById('txtFocal').innerText = mm + 'mm';
+        
+        // 更新按钮高亮
+        document.querySelectorAll('.focal-opt').forEach(d => 
+            d.classList.toggle('active', parseInt(d.innerText) === mm));
+
+        const baseMM = 24; // 基础广角
+        const line = els.frameLine;
+        
+        if (mm === baseMM) {
+            line.style.opacity = 0; // 全屏不显示框
+        } else {
+            // 计算缩放比例
+            const ratio = baseMM / mm; // 例如 24/50 = 0.48
+            line.style.width = (ratio * 100) + '%';
+            // 假设 4:3 比例的框线 (iPhone照片比例)
+            // 屏幕很长(19.5:9)，我们需要计算相对高度
+            // 简单处理：高度也按比例缩放，并保持 4:3 宽高比
+            // 屏幕宽 W, 高 H. 框宽 w = W * ratio. 框高 h = w * (4/3). 
+            // 在CSS里直接用 aspect-ratio 更好，但在旧Webview里可能不支持，这里简单用宽高百分比
+            // 为了简化，我们假设框线是正方形或随屏幕比例，这里做成模拟 4:3 的样子:
+            line.style.height = `calc(${ratio * 100}vw * 1.33)`; 
+            
+            line.style.opacity = 1;
+            line.setAttribute('data-focal', mm + 'mm');
+        }
+    }
+
+    // 滤镜混合逻辑
+    function applyFilter() {
+        const v = getVideoEl();
+        let filterStr = '';
+        
+        // 基础相机预设
+        let contrast = 1, saturate = 1, gray = 0;
+        if (state.cam === 'leica') { contrast = 1.1; saturate = 1.1; }
+        if (state.cam === 'ricoh') { contrast = 1.5; gray = 1; }
+        if (state.cam === 'fuji') { contrast = 1.05; saturate = 1.2; }
+
+        // EV 影响亮度
+        const brightness = 1 + (state.ev * 0.15);
+
+        // Temp 影响色相和复古色
+        // 简易模拟：冷暖色温
+        const tempDiff = state.temp - 5500;
+        const hue = (tempDiff / 5000) * 10;
+        const sepia = tempDiff > 0 ? (tempDiff/8000) : 0;
+
+        filterStr = `brightness(${brightness}) contrast(${contrast}) saturate(${saturate}) grayscale(${gray}) hue-rotate(${hue}deg) sepia(${sepia})`;
+        v.style.filter = filterStr;
+    }
+
+    function setCam(type, el) {
+        state.cam = type;
+        document.querySelectorAll('.cam-card').forEach(c => c.classList.remove('selected'));
+        el.classList.add('selected');
+        applyFilter();
+    }
+
+    function toggleDrawer() {
+        document.getElementById('camDrawer').classList.toggle('open');
+        state.mode = null;
+        els.adjPanel.classList.remove('show');
+    }
+
+    function snap() {
+        // 震动反馈 (如果设备支持)
+        if (navigator.vibrate) navigator.vibrate(50);
+        
+        // 黑屏动画
+        const flash = document.getElementById('flash-overlay');
+        flash.style.opacity = 1;
+        setTimeout(() => flash.style.opacity = 0, 150);
+    }
+</script>
+</body>
+</html>
